@@ -1,0 +1,24 @@
+---
+# ============================
+# MYSQL MASTER
+# ============================
+- hosts: Role_Master
+  become: yes
+  roles:
+    - mysql_master
+
+# ============================
+# MYSQL SLAVE
+# ============================
+- hosts: Role_Slave
+  become: yes
+  roles:
+    - mysql_slave
+
+# ============================
+# MYSQL CLIENT
+# ============================
+- hosts: Role_Client
+  become: yes
+  roles:
+    - mysql_client
