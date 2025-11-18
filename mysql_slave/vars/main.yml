@@ -1,3 +1,0 @@
-mysql_root_password: "StrongRootPass123"
-replication_user: "repl_user"
-replication_password: "ReplPass123"
