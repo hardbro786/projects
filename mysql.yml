@@ -1,0 +1,340 @@
+---
+# ===============================================
+# MYSQL MASTER SERVER SETUP
+# ===============================================
+- name: Setup MySQL Master Server
+  hosts: "{{ groups['_server'][0] }}"
+  become: yes
+  vars:
+    mysql_root_password: "StrongRootPass123"
+    replication_user: "repl_user"
+    replication_password: "ReplPass123"
+
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Install MySQL and dependencies
+      apt:
+        name:
+          - mysql-server
+          - python3-pymysql
+        state: present
+
+    - name: Ensure MySQL is running
+      service:
+        name: mysql
+        state: started
+        enabled: yes
+
+    - name: Wait for MySQL to be ready
+      wait_for:
+        port: 3306
+        delay: 10
+        timeout: 30
+
+    - name: Secure MySQL installation and set root password
+      shell: |
+        if mysql -u root -e "SELECT 1;" 2>/dev/null; then
+          mysql -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '{{ mysql_root_password }}'; FLUSH PRIVILEGES;"
+        else
+          sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '{{ mysql_root_password }}'; FLUSH PRIVILEGES;" 2>/dev/null || true
+        fi
+      args:
+        executable: /bin/bash
+      ignore_errors: yes
+
+    - name: Stop MySQL for configuration
+      service:
+        name: mysql
+        state: stopped
+
+    - name: Configure MySQL as Master
+      blockinfile:
+        path: /etc/mysql/mysql.conf.d/mysqld.cnf
+        block: |
+          [mysqld]
+          server-id = 1
+          log_bin = /var/log/mysql/mysql-bin.log
+          bind-address = 0.0.0.0
+          binlog_format = ROW
+          expire_logs_days = 10
+          max_binlog_size = 100M
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - MySQL Master"
+
+    - name: Set bind-address to 0.0.0.0
+      lineinfile:
+        path: /etc/mysql/mysql.conf.d/mysqld.cnf
+        regexp: '^bind-address'
+        line: 'bind-address = 0.0.0.0'
+        state: present
+
+    - name: Start MySQL after configuration
+      service:
+        name: mysql
+        state: started
+
+    - name: Wait for MySQL to restart
+      wait_for:
+        port: 3306
+        delay: 5
+        timeout: 30
+
+    - name: Create replication user
+      community.mysql.mysql_user:
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+        name: "{{ replication_user }}"
+        password: "{{ replication_password }}"
+        host: '%'
+        priv: "*.*:REPLICATION SLAVE"
+        state: present
+
+    - name: Enable root remote access
+      shell: |
+        mysql -u root -p{{ mysql_root_password }} -e "CREATE USER IF NOT EXISTS 'root'@'%' IDENTIFIED BY '{{ mysql_root_password }}';" 2>/dev/null || true
+        mysql -u root -p{{ mysql_root_password }} -e "GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;" 2>/dev/null || true
+        mysql -u root -p{{ mysql_root_password }} -e "FLUSH PRIVILEGES;" 2>/dev/null || true
+      args:
+        executable: /bin/bash
+      ignore_errors: yes
+
+    - name: Create application database
+      community.mysql.mysql_db:
+        name: mydb
+        state: present
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+
+    - name: Create test table
+      community.mysql.mysql_query:
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+        query: "CREATE TABLE IF NOT EXISTS mydb.test (id INT AUTO_INCREMENT PRIMARY KEY, data VARCHAR(50));"
+
+    - name: Insert initial record
+      community.mysql.mysql_query:
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+        query: "INSERT INTO mydb.test (data) VALUES ('Master server record');"
+
+    - name: Get master status
+      shell: |
+        result=$(mysql -u root -p{{ mysql_root_password }} -e "SHOW MASTER STATUS;" 2>/dev/null | tail -n 1)
+        if [ -n "$result" ]; then
+          echo "$result" | awk '{print $1 " " $2}'
+        else
+          echo "mysql-bin.000001 107"
+        fi
+      args:
+        executable: /bin/bash
+      register: master_status_raw
+
+    - name: Extract master log file and position
+      set_fact:
+        master_log_file: "{{ master_status_raw.stdout.split(' ')[0] }}"
+        master_log_pos: "{{ master_status_raw.stdout.split(' ')[1] }}"
+
+# ===============================================
+# MYSQL SLAVE SERVER SETUP
+# ===============================================
+- name: Setup MySQL Slave Server
+  hosts: "{{ groups['_server'][1] }}"
+  become: yes
+  vars:
+    mysql_root_password: "StrongRootPass123"
+    replication_user: "repl_user"
+    replication_password: "ReplPass123"
+    master_host: "{{ groups['_server'][0] }}"
+
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Install MySQL and dependencies
+      apt:
+        name:
+          - mysql-server
+          - python3-pymysql
+        state: present
+
+    - name: Ensure MySQL is running
+      service:
+        name: mysql
+        state: started
+        enabled: yes
+
+    - name: Wait for MySQL to be ready
+      wait_for:
+        port: 3306
+        delay: 10
+        timeout: 30
+
+    - name: Secure MySQL installation and set root password
+      shell: |
+        if mysql -u root -e "SELECT 1;" 2>/dev/null; then
+          mysql -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '{{ mysql_root_password }}'; FLUSH PRIVILEGES;"
+        else
+          sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '{{ mysql_root_password }}'; FLUSH PRIVILEGES;" 2>/dev/null || true
+        fi
+      args:
+        executable: /bin/bash
+      ignore_errors: yes
+
+    - name: Stop MySQL for configuration
+      service:
+        name: mysql
+        state: stopped
+
+    - name: Configure MySQL as Slave
+      blockinfile:
+        path: /etc/mysql/mysql.conf.d/mysqld.cnf
+        block: |
+          [mysqld]
+          server-id = 2
+          log_bin = /var/log/mysql/mysql-bin.log
+          relay-log = /var/log/mysql/mysql-relay-bin.log
+          read_only = 1
+          bind-address = 0.0.0.0
+          binlog_format = ROW
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - MySQL Slave"
+
+    - name: Start MySQL after configuration
+      service:
+        name: mysql
+        state: started
+
+    - name: Wait for MySQL to restart
+      wait_for:
+        port: 3306
+        delay: 5
+        timeout: 30
+
+    - name: Enable root remote access
+      shell: |
+        mysql -u root -p{{ mysql_root_password }} -e "CREATE USER IF NOT EXISTS 'root'@'%' IDENTIFIED BY '{{ mysql_root_password }}';" 2>/dev/null || true
+        mysql -u root -p{{ mysql_root_password }} -e "GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;" 2>/dev/null || true
+        mysql -u root -p{{ mysql_root_password }} -e "FLUSH PRIVILEGES;" 2>/dev/null || true
+      args:
+        executable: /bin/bash
+      ignore_errors: yes
+
+    - name: Get master info using Ansible facts
+      set_fact:
+        master_log_file: "{{ hostvars[groups['_server'][0]]['master_log_file'] }}"
+        master_log_pos: "{{ hostvars[groups['_server'][0]]['master_log_pos'] }}"
+
+    - name: Configure replication to master
+      shell: |
+        mysql -u root -p{{ mysql_root_password }} -e "
+        STOP SLAVE; RESET SLAVE ALL;
+        CHANGE MASTER TO
+        MASTER_HOST='{{ master_host }}',
+        MASTER_USER='{{ replication_user }}',
+        MASTER_PASSWORD='{{ replication_password }}',
+        MASTER_LOG_FILE='{{ master_log_file }}',
+        MASTER_LOG_POS={{ master_log_pos }};
+        START SLAVE;"
+      args:
+        executable: /bin/bash
+
+    - name: Check slave status
+      shell: |
+        mysql -u root -p{{ mysql_root_password }} -e "SHOW SLAVE STATUS\G"
+      args:
+        executable: /bin/bash
+      register: slave_status
+
+    - name: Display slave status details
+      debug:
+        msg: |
+          Slave IO Running: {{ slave_status.stdout | regex_search('Slave_IO_Running: (Yes|No)') }}
+          Slave SQL Running: {{ slave_status.stdout | regex_search('Slave_SQL_Running: (Yes|No)') }}
+          Seconds Behind Master: {{ slave_status.stdout | regex_search('Seconds_Behind_Master: (\d+)') }}
+
+# ===============================================
+# MYSQL CLIENT SETUP
+# ===============================================
+- name: Setup MySQL Client
+  hosts: _client
+  become: yes
+  vars:
+    mysql_root_password: "StrongRootPass123"
+    master_ip: "{{ groups['_server'][0] }}"
+    slave_ip: "{{ groups['_server'][1] }}"
+
+  tasks:
+    - name: Display server IPs
+      debug:
+        msg:
+          - "Master Server IP: {{ master_ip }}"
+          - "Slave Server IP: {{ slave_ip }}"
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Install MySQL Client only (no server)
+      apt:
+        name:
+          - mysql-client
+          - python3-pymysql
+        state: present
+
+    - name: Wait for servers to be ready
+      wait_for:
+        host: "{{ master_ip }}"
+        port: 3306
+        delay: 10
+        timeout: 60
+
+    - name: Test connection to master server
+      shell: |
+        mysql -h {{ master_ip }} -u root -p{{ mysql_root_password }} -e "SHOW DATABASES;"
+      args:
+        executable: /bin/bash
+      register: master_test
+      ignore_errors: yes
+
+    - name: Test connection to slave server
+      shell: |
+        mysql -h {{ slave_ip }} -u root -p{{ mysql_root_password }} -e "SHOW DATABASES;"
+      args:
+        executable: /bin/bash
+      register: slave_test
+      ignore_errors: yes
+
+    - name: Display connection test results
+      debug:
+        msg:
+          - "Master connection: {{ 'SUCCESS' if master_test is succeeded else 'FAILED' }}"
+          - "Slave connection: {{ 'SUCCESS' if slave_test is succeeded else 'FAILED' }}"
+
+    - name: Test replication functionality
+      shell: |
+        set -e
+        mysql -h {{ master_ip }} -u root -p{{ mysql_root_password }} -e "CREATE DATABASE IF NOT EXISTS replication_test;"
+        mysql -h {{ master_ip }} -u root -p{{ mysql_root_password }} -e "USE replication_test; CREATE TABLE IF NOT EXISTS test_data (id INT, name VARCHAR(100));"
+        mysql -h {{ master_ip }} -u root -p{{ mysql_root_password }} -e "USE replication_test; INSERT INTO test_data VALUES (1, 'Replication Test');"
+        sleep 5
+        echo "=== Checking replication on slave ==="
+        mysql -h {{ slave_ip }} -u root -p{{ mysql_root_password }} -e "SHOW DATABASES LIKE 'replication_test';"
+        mysql -h {{ slave_ip }} -u root -p{{ mysql_root_password }} -e "USE replication_test; SELECT * FROM test_data;"
+        echo "=== Slave Status ==="
+        mysql -h {{ slave_ip }} -u root -p{{ mysql_root_password }} -e "SHOW SLAVE STATUS\G" | grep -E "Slave_IO_Running|Slave_SQL_Running|Seconds_Behind_Master|Last_Error"
+      args:
+        executable: /bin/bash
+      register: replication_test
+      ignore_errors: yes
+
+    - name: Display replication test result
+      debug:
+        msg: "Replication test completed. Check output above for details."
+
+    - name: Show final replication status
+      debug:
+        msg: |
+          Replication Test Output:
+          {{ replication_test.stdout }}
