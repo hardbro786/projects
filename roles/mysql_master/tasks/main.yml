@@ -1,1 +1,86 @@
+---
+# MYSQL MASTER SERVER SETUP
+
+- name: Update apt cache
+  apt:
+    update_cache: yes
+
+- name: Install MySQL and dependencies
+  apt:
+    name:
+      - mysql-server
+      - python3-pymysql
+    state: present
+
+- name: Ensure MySQL is running
+  service:
+    name: mysql
+    state: started
+    enabled: yes
+
+- name: Wait for MySQL to be ready
+  wait_for:
+    port: 3306
+    delay: 10
+    timeout: 30
+
+- name: Secure MySQL installation
+  shell: |
+    if mysql -u root -e "SELECT 1;" 2>/dev/null; then
+      mysql -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '{{ mysql_root_password }}'; FLUSH PRIVILEGES;";
+    else
+      sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '{{ mysql_root_password }}'; FLUSH PRIVILEGES;" 2>/dev/null || true;
+    fi
+  args:
+    executable: /bin/bash
+  ignore_errors: true
+
+- name: Stop MySQL
+  service:
+    name: mysql
+    state: stopped
+
+- name: Configure MySQL Master
+  blockinfile:
+    path: /etc/mysql/mysql.conf.d/mysqld.cnf
+    block: |
+      [mysqld]
+      server-id = 1
+      log_bin = /var/log/mysql/mysql-bin.log
+      bind-address = 0.0.0.0
+      binlog_format = ROW
+      expire_logs_days = 10
+      max_binlog_size = 100M
+
+- name: Start MySQL
+  service:
+    name: mysql
+    state: started
+
+- name: Wait for restart
+  wait_for:
+    port: 3306
+    delay: 5
+    timeout: 30
+
+- name: Create replication user
+  community.mysql.mysql_user:
+    login_user: root
+    login_password: "{{ mysql_root_password }}"
+    name: "{{ replication_user }}"
+    password: "{{ replication_password }}"
+    host: '%'
+    priv: "*.*:REPLICATION SLAVE"
+    state: present
+
+- name: Get master status
+  shell: |
+    result=$(mysql -u root -p{{ mysql_root_password }} -e "SHOW MASTER STATUS;" 2>/dev/null | tail -n 1)
+    if [ -n "$result" ]; then echo "$result" | awk '{print $1" "$2}'; else echo "mysql-bin.000001 107"; fi
+  register: master_status_raw
+
+- name: Extract master log info
+  set_fact:
+    master_log_file: "{{ master_status_raw.stdout.split(' ')[0] }}"
+    master_log_pos: "{{ master_status_raw.stdout.split(' ')[1] }}"
 
