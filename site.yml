@@ -2,7 +2,7 @@
 # ============================
 # MYSQL MASTER
 # ============================
-- hosts: Role_Master
+- hosts: _Master
   become: yes
   roles:
     - mysql_master
@@ -10,7 +10,7 @@
 # ============================
 # MYSQL SLAVE
 # ============================
-- hosts: Role_Slave
+- hosts: _Slave
   become: yes
   roles:
     - mysql_slave
@@ -18,7 +18,7 @@
 # ============================
 # MYSQL CLIENT
 # ============================
-- hosts: Role_Client
+- hosts: _Client
   become: yes
   roles:
     - mysql_client
